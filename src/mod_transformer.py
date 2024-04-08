@@ -85,109 +85,99 @@ class FeedForward(nn.Module):
     def forward(self, x):
         return self.W_2(F.relu(self.W_1(x)))
 
-
-# Transformer definition
-
-class TransformerEncoderLayer(nn.Module):
-    def __init__(self, num_hidden, num_heads, seq_len) -> None:
-        super().__init__()
-        self.multihead_attention = MultiHeadAttention(num_hidden=num_hidden, num_heads=num_heads, seq_len=seq_len, d_k=1)
-        self.feed_forward = FeedForward(num_hidden=num_hidden, num_ffn_hidden=2 * num_hidden)
-        self.layer_norm1 = nn.LayerNorm(num_hidden)
-        self.layer_norm2 = nn.LayerNorm(num_hidden)
-    
-    def forward(self, input_with_pos):
-        #attention 
-        x = self.multihead_attention(input_with_pos, input_with_pos, input_with_pos)
-        
-        #add and norm
-        x = x + input_with_pos
-        x = self.layer_norm1(x)
-
-        # add norm 
-        x_final = self.feed_forward(x)
-        x = x + x_final
-
-        x = self.layer_norm2(x)
-        return x
-
 class TransformerDecoder(nn.Module):
     def __init__(self, num_layers, n_heads, seq_len, num_hidden) -> None:
         super().__init__()
         self.num_layers = num_layers
         self.decoders = nn.ModuleList([TransformerDecoderLayer(num_hidden, n_heads, seq_len) for i in range(num_layers)])
 
-    def forward(self, x, encoder_output):
-        for layer in self.decoders:
-            x = layer(x, encoder_output)
-        return x
-
-class TransformerEncoder(nn.Module):
-    def __init__(self, num_layers, n_heads, seq_len, num_hidden) -> None:
-        super().__init__()
-        self.num_layers = num_layers
-        self.encoders = nn.ModuleList([TransformerEncoderLayer(num_hidden, n_heads, seq_len) for i in range(num_layers)])
     def forward(self, x):
-        for layer in self.encoders:
+        for layer in self.decoders:
             x = layer(x)
         return x
-
+    
 
 class TransformerDecoderLayer(nn.Module):
     def __init__(self, num_hidden, num_heads, seq_len) -> None:
         super().__init__()
-        self.multihead_attention_masked = MultiHeadAttention(num_hidden=num_hidden, num_heads=num_heads, seq_len=seq_len, d_k=1)
-        self.multihead_attention = MultiHeadAttention(num_hidden=num_hidden, num_heads=num_heads, seq_len=seq_len, d_k=1)
+        topk_seq_len = seq_len // 2
+        self.multihead_attention_masked = MultiHeadAttention(num_hidden=num_hidden, num_heads=num_heads, seq_len=topk_seq_len, d_k=1)
+        self.multihead_attention = MultiHeadAttention(num_hidden=num_hidden, num_heads=num_heads, seq_len=topk_seq_len, d_k=1)
         
         self.feed_forward = FeedForward(num_hidden=num_hidden, num_ffn_hidden= 2 * num_hidden)
         self.layer_norm1 = nn.LayerNorm(num_hidden)
         self.layer_norm2 = nn.LayerNorm(num_hidden)
         self.layer_norm3 = nn.LayerNorm(num_hidden)
+        self.router = Router(top_k=seq_len//2, num_hidden=num_hidden)
+
     
-    def forward(self, output_with_pos, encoder_output):
+    def forward(self, x_in):
+        # basically route some tokens in or around the att + lin + norm + feedforward block
+
+        #get topk 
+        x_topk, x_topk_indices = self.router(x_in)
+
         # masked attention
-        x = self.multihead_attention_masked(output_with_pos, output_with_pos, output_with_pos, mask=True)
+        x_topk_att = self.multihead_attention_masked(x_topk, x_topk, x_topk, mask=True)
         #add and norm
-        x = x + output_with_pos
-        x = self.layer_norm1(x)
+        x_topk = x_topk + x_topk_att
+        x_topk = self.layer_norm1(x_topk)
 
         # attention
-        x_attention = self.multihead_attention(encoder_output, encoder_output, x)
+        x_topk_att = self.multihead_attention(x_topk, x_topk, x_topk)
 
         #add and norm
-        x = x + x_attention
-        x = self.layer_norm2(x)
+        x_topk = x_topk + x_topk_att
+        x_topk = self.layer_norm2(x_topk)
 
         #feed forward
-        x_forward = self.feed_forward(x)
+        x_topk_forward = self.feed_forward(x_topk)
 
         #add and norm
-        x = x + x_forward
+        x_topk = x_topk_forward + x_topk
+
+        #now you want to insert the tokens back into the original sequence, index by x_topk_indices 
+        x = x_in.scatter_(1, x_topk_indices.expand(-1, -1, x_in.size(-1)), x_topk)
+
         x = self.layer_norm3(x)
         return x
 
 class Transformer(nn.Module):
-    def __init__(self, encoder_layers_num, decoder_layers_num, num_hidden, num_heads, seq_len, vocab_size, embedding_dim) -> None:
+    def __init__(self, decoder_layers_num, num_hidden, num_heads, seq_len, vocab_size, embedding_dim) -> None:
         super().__init__()
-        self.encoder = TransformerEncoder(encoder_layers_num, num_heads, seq_len, num_hidden)
         self.decoder = TransformerDecoder(decoder_layers_num, num_heads, seq_len, num_hidden)
         self.pos_enc = PositionalEncoding(embedding_dim, max_len=seq_len)
         self.embedding = nn.Embedding(vocab_size, embedding_dim)
         self.linear = nn.Linear(embedding_dim, vocab_size)
         self.softmax = nn.Softmax(dim=-1)
 
-    def forward(self, x, y):
+    def forward(self, x):
         #embeddings
         x = self.embedding(x)
-        y = self.embedding(y)
 
         #pos encodings
         x = self.pos_enc(x)
-        y = self.pos_enc(y)
 
         #forward pass
-        enc_output = self.encoder(x)
-        dec_output = self.decoder(y, enc_output)
+        dec_output = self.decoder(x)
         output = self.linear(dec_output)
 
         return output
+
+
+
+class Router(nn.Module):
+    def __init__(self, top_k, num_hidden):
+        super().__init__()
+        self.linear = nn.Linear(num_hidden, 1)
+        self.top_k = top_k
+
+    def forward(self, x):
+        #get scores for each token
+        scores = self.linear(x)
+        #get top k tokens 
+        top_k_scores, top_k_indices = torch.topk(scores, self.top_k, dim=1)
+        #get topk from x
+        x_top_k = x.gather(1, top_k_indices.expand(-1, -1, x.size(-1)))
+
+        return x_top_k, top_k_indices
