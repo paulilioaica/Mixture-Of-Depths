@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
+from router import Router
 
 # Positional encoding definition
 
@@ -39,7 +40,7 @@ class MultiHeadAttention(nn.Module):
     
     def get_mask(self, size):
         device = next(self.parameters()).device
-        mask = torch.triu(torch.ones(size, size, device=device), diagonal=0)  
+        mask = torch.triu(torch.ones(size, size, device=device), diagonal=1)  
         return mask.unsqueeze(0).unsqueeze(0)  
 
     def forward(self, query, key, values, dropout=0.1, mask=None):
@@ -137,9 +138,9 @@ class TransformerDecoderLayer(nn.Module):
         x_topk = x_topk_forward + x_topk
 
         #now you want to insert the tokens back into the original sequence, index by x_topk_indices 
-        x = x_in.scatter_(1, x_topk_indices.expand(-1, -1, x_in.size(-1)), x_topk)
+        x_in.scatter_(1, x_topk_indices.expand(-1, -1, x_in.size(-1)), x_topk)
 
-        x = self.layer_norm3(x)
+        x = self.layer_norm3(x_in)
         return x
 
 class Transformer(nn.Module):
@@ -165,19 +166,3 @@ class Transformer(nn.Module):
         return output
 
 
-
-class Router(nn.Module):
-    def __init__(self, top_k, num_hidden):
-        super().__init__()
-        self.linear = nn.Linear(num_hidden, 1)
-        self.top_k = top_k
-
-    def forward(self, x):
-        #get scores for each token
-        scores = self.linear(x)
-        #get top k tokens 
-        top_k_scores, top_k_indices = torch.topk(scores, self.top_k, dim=1)
-        #get topk from x
-        x_top_k = x.gather(1, top_k_indices.expand(-1, -1, x.size(-1)))
-
-        return x_top_k, top_k_indices
