@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import math
-from router import Router
+from src.router import Router
 
 # Positional encoding definition
 
@@ -86,11 +86,11 @@ class FeedForward(nn.Module):
     def forward(self, x):
         return self.W_2(F.relu(self.W_1(x)))
 
-class TransformerDecoder(nn.Module):
+class MixtureOfDepthsTransformerDecoder(nn.Module):
     def __init__(self, num_layers, n_heads, seq_len, num_hidden) -> None:
         super().__init__()
         self.num_layers = num_layers
-        self.decoders = nn.ModuleList([TransformerDecoderLayer(num_hidden, n_heads, seq_len) for i in range(num_layers)])
+        self.decoders = nn.ModuleList([MixtureOfDepthsTransformerDecoderLayer(num_hidden, n_heads, seq_len) for i in range(num_layers)])
 
     def forward(self, x):
         for layer in self.decoders:
@@ -98,7 +98,7 @@ class TransformerDecoder(nn.Module):
         return x
     
 
-class TransformerDecoderLayer(nn.Module):
+class MixtureOfDepthsTransformerDecoderLayer(nn.Module):
     def __init__(self, num_hidden, num_heads, seq_len) -> None:
         super().__init__()
         topk_seq_len = seq_len // 2
@@ -137,16 +137,20 @@ class TransformerDecoderLayer(nn.Module):
         #add and norm
         x_topk = x_topk_forward + x_topk
 
-        #now you want to insert the tokens back into the original sequence, index by x_topk_indices 
-        x_in.scatter_(1, x_topk_indices.expand(-1, -1, x_in.size(-1)), x_topk)
+        #res
+        x_in_copy = x_in.clone()
 
-        x = self.layer_norm3(x_in)
+        # Scatter_add_ operation
+        x_in_copy.scatter_add_(1, x_topk_indices.expand(-1, -1, x_in.size(-1)), x_topk)
+
+
+        x = self.layer_norm3(x_in_copy)
         return x
 
-class Transformer(nn.Module):
+class MixtureOfDepthsTransformer(nn.Module):
     def __init__(self, decoder_layers_num, num_hidden, num_heads, seq_len, vocab_size, embedding_dim) -> None:
         super().__init__()
-        self.decoder = TransformerDecoder(decoder_layers_num, num_heads, seq_len, num_hidden)
+        self.decoder = MixtureOfDepthsTransformerDecoder(decoder_layers_num, num_heads, seq_len, num_hidden)
         self.pos_enc = PositionalEncoding(embedding_dim, max_len=seq_len)
         self.embedding = nn.Embedding(vocab_size, embedding_dim)
         self.linear = nn.Linear(embedding_dim, vocab_size)
